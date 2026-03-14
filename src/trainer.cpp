@@ -316,6 +316,14 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             total_val_loss /= (val_epoch_size / val_loader->batch_size);
             float epoch_loss = (total_epoch_loss / num_batches).item<float>();
             progress.end_epoch(epoch, max_epochs, batch_loss.item<float>(), epoch_loss, itps, total_val_loss);
+
+            if (epoch % save_rate == 0)
+            {
+                path << output_dir << "/epoch-" << epoch << ".nnue";
+                nnue.save(path.str());
+                save_torch_weights(nnue, path.str());
+                path.clear();
+            }
         }
     } else
     {
@@ -369,6 +377,14 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             total_val_loss /= (val_epoch_size / val_loader->batch_size);
             float epoch_loss = (total_epoch_loss / num_batches).item<float>();
             progress.end_epoch(epoch, max_epochs, batch_loss.item<float>(), epoch_loss, itps, total_val_loss);
+
+            if (epoch % save_rate == 0)
+            {
+                path << output_dir << "/epoch-" << epoch << ".nnue";
+                nnue.save(path.str());
+                save_torch_weights(nnue, path.str());
+                path.clear();
+            }
         }
     }
 }
