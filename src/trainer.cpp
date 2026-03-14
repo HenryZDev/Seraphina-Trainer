@@ -260,6 +260,8 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.clear();
+                path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
                 path.clear();
             }
@@ -321,6 +323,8 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.clear();
+                path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
                 path.clear();
             }
@@ -382,6 +386,8 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.clear();
+                path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
                 path.clear();
             }
