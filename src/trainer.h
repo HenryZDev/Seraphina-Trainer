@@ -26,7 +26,9 @@ class Trainer
 {
     bool unix = get_unix();
     bool cuda = true;
-    torch::Tensor x1_sparse, x2_sparse, target;
+    std::vector<std::vector<int>> x1_indices;
+    std::vector<std::vector<int>> x2_indices;
+    torch::Tensor target;
 
 public:
     void setup_inputs_and_outputs(const binpackloader::DataSet& positions, float& sigmoid_scale, float& start_lambda,

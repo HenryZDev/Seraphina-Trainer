@@ -34,26 +34,21 @@ void Trainer::setup_inputs_and_outputs(const binpackloader::DataSet& positions, 
     torch::set_num_threads(1);
     int batch_size = positions.size();
     target = torch::zeros({batch_size, 1});
-
-    std::vector<std::vector<int>> x1_indices(batch_size);
-    std::vector<std::vector<int>> x2_indices(batch_size);
-
-    // Prepare per-thread storage
-    std::vector<std::vector<int64_t>> x1_row_indices_threads(threads);
-    std::vector<std::vector<int64_t>> x1_col_indices_threads(threads);
-    std::vector<std::vector<float>> x1_values_threads(threads);
-    std::vector<std::vector<int64_t>> x2_row_indices_threads(threads);
-    std::vector<std::vector<int64_t>> x2_col_indices_threads(threads);
-    std::vector<std::vector<float>> x2_values_threads(threads);
+    x1_indices_tensor = torch::full({batch_size, max_active}, -1, torch::kInt64);
+    x2_indices_tensor = torch::full({batch_size, max_active}, -1, torch::kInt64);
+    x1_counts_tensor = torch::zeros({batch_size}, torch::kInt64);
+    x2_counts_tensor = torch::zeros({batch_size}, torch::kInt64);
 
 #pragma omp parallel for schedule(static, 64) num_threads(threads)
     for (int b = 0; b < batch_size; ++b)
     {
-        int tid = omp_get_thread_num();
         const binpack::chess::Position& pos = positions[b].pos;
         binpack::chess::Square wKingSq = pos.kingSquare(binpack::chess::Color::White);
         binpack::chess::Square bKingSq = pos.kingSquare(binpack::chess::Color::Black);
         binpack::chess::Bitboard pieces = pos.piecesBB();
+
+        std::vector<int64_t> x1_indices_vec;
+        std::vector<int64_t> x2_indices_vec;
 
         for (binpack::chess::Square& sq : pieces)
         {
@@ -65,28 +60,38 @@ void Trainer::setup_inputs_and_outputs(const binpackloader::DataSet& positions, 
 
             if (pos.sideToMove() == binpack::chess::Color::White)
             {
-                x1_indices[b].emplace_back(piece_index_white_pov);
-                x2_indices[b].emplace_back(piece_index_black_pov);
+                x1_indices_vec.emplace_back(piece_index_white_pov);
+                x2_indices_vec.emplace_back(piece_index_black_pov);
             } else
             {
-                x2_indices[b].emplace_back(piece_index_white_pov);
-                x1_indices[b].emplace_back(piece_index_black_pov);
+                x2_indices_vec.emplace_back(piece_index_white_pov);
+                x1_indices_vec.emplace_back(piece_index_black_pov);
             }
         }
 
-        for (int& idx : x1_indices[b])
+        int x1_count = 0, x2_count = 0;
+
+        for (int64_t idx : x1_indices_vec)
         {
-            x1_row_indices_threads[tid].emplace_back(b);
-            x1_col_indices_threads[tid].emplace_back(idx);
-            x1_values_threads[tid].emplace_back(static_cast<float>(idx));
+            if (x1_count < max_active)
+            {
+                x1_indices_tensor[b][x1_count] = idx;
+                x1_count++;
+            }
         }
 
-        for (int& idx : x2_indices[b])
+        x1_counts_tensor[b] = x1_count;
+
+        for (auto idx : x2_indices_vec)
         {
-            x2_row_indices_threads[tid].emplace_back(b);
-            x2_col_indices_threads[tid].emplace_back(idx);
-            x2_values_threads[tid].emplace_back(static_cast<float>(idx));
+            if (x2_count < max_active)
+            {
+                x2_indices_tensor[b][x2_count] = idx;
+                x2_count++;
+            }
         }
+
+        x2_counts_tensor[b] = x2_count;
 
         float p_value = positions[b].score;
         float w_value = positions[b].result;
@@ -96,41 +101,19 @@ void Trainer::setup_inputs_and_outputs(const binpackloader::DataSet& positions, 
         target[b][0] = (actual_lambda * p_target + (1.0f - actual_lambda) * w_target);
     }
 
-    // Merge per-thread vectors into the main vectors in order
-    std::vector<int64_t> x1_row_indices, x1_col_indices, x2_row_indices, x2_col_indices;
-    std::vector<float> x1_values, x2_values;
-
-    for (int t = 0; t < threads; ++t)
-    {
-        x1_row_indices.insert(x1_row_indices.end(), x1_row_indices_threads[t].begin(), x1_row_indices_threads[t].end());
-        x1_col_indices.insert(x1_col_indices.end(), x1_col_indices_threads[t].begin(), x1_col_indices_threads[t].end());
-        x1_values.insert(x1_values.end(), x1_values_threads[t].begin(), x1_values_threads[t].end());
-        x2_row_indices.insert(x2_row_indices.end(), x2_row_indices_threads[t].begin(), x2_row_indices_threads[t].end());
-        x2_col_indices.insert(x2_col_indices.end(), x2_col_indices_threads[t].begin(), x2_col_indices_threads[t].end());
-        x2_values.insert(x2_values.end(), x2_values_threads[t].begin(), x2_values_threads[t].end());
-    }
-
-    at::Tensor x1_row_tensor = torch::tensor(x1_row_indices, torch::kInt64);
-    at::Tensor x1_col_tensor = torch::tensor(x1_col_indices, torch::kInt64);
-    at::Tensor x1_indices_tensor = torch::stack({x1_row_tensor, x1_col_tensor}, 0);
-    at::Tensor x1_values_tensor = torch::tensor(x1_values, torch::kFloat);
-    x1_sparse = torch::sparse_coo_tensor(x1_indices_tensor, x1_values_tensor, {batch_size, 32 * 12 * 64});
-
-    at::Tensor x2_row_tensor = torch::tensor(x2_row_indices, torch::kInt64);
-    at::Tensor x2_col_tensor = torch::tensor(x2_col_indices, torch::kInt64);
-    at::Tensor x2_indices_tensor = torch::stack({x2_row_tensor, x2_col_tensor}, 0);
-    at::Tensor x2_values_tensor = torch::tensor(x2_values, torch::kFloat);
-    x2_sparse = torch::sparse_coo_tensor(x2_indices_tensor, x2_values_tensor, {batch_size, 32 * 12 * 64});
-
     if (cuda)
     {
-        x1_sparse = x1_sparse.to(torch::kCUDA);
-        x2_sparse = x2_sparse.to(torch::kCUDA);
+        x1_indices_tensor = x1_indices_tensor.to(torch::kCUDA);
+        x2_indices_tensor = x2_indices_tensor.to(torch::kCUDA);
+        x1_counts_tensor = x1_counts_tensor.to(torch::kCUDA);
+        x2_counts_tensor = x2_counts_tensor.to(torch::kCUDA);
         target = target.to(torch::kCUDA);
     } else
     {
-        x1_sparse = x1_sparse.to(torch::kCPU);
-        x2_sparse = x2_sparse.to(torch::kCPU);
+        x1_indices_tensor = x1_indices_tensor.to(torch::kCPU);
+        x2_indices_tensor = x2_indices_tensor.to(torch::kCPU);
+        x1_counts_tensor = x1_counts_tensor.to(torch::kCPU);
+        x2_counts_tensor = x2_counts_tensor.to(torch::kCPU);
         target = target.to(torch::kCPU);
     }
 
@@ -217,13 +200,19 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
                 std::chrono::steady_clock::time_point batch_start = std::chrono::high_resolution_clock::now();
 
                 binpackloader::DataSet ds = train_loader.next();
+
                 if (ds.size() == 0)
                 {
                     std::cerr << "Warning: train_loader.next() returned an empty dataset at batch " << b << std::endl;
                     continue;  // Skip this batch
                 }
+
                 setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
-                batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+
+                SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                 total_epoch_loss += batch_loss;
                 batch_loss.backward();
 
@@ -247,7 +236,10 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
                     auto ds = val_loader->next();
                     setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
 
-                    val_batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+                    SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                    SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                    val_batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                     total_val_loss += val_batch_loss.item<float>();
                 }
             }
@@ -260,9 +252,11 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.str("");
                 path.clear();
                 path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
+                path.str("");
                 path.clear();
             }
         }
@@ -284,7 +278,11 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
 
                 binpackloader::DataSet ds = train_loader.next();
                 setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
-                batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+
+                SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                 total_epoch_loss += batch_loss;
                 batch_loss.backward();
 
@@ -310,7 +308,10 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
                     auto ds = val_loader->next();
                     setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
 
-                    val_batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+                    SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                    SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                    val_batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                     total_val_loss += val_batch_loss.item<float>();
                 }
             }
@@ -323,9 +324,11 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.str("");
                 path.clear();
                 path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
+                path.str("");
                 path.clear();
             }
         }
@@ -347,7 +350,11 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
 
                 binpackloader::DataSet ds = train_loader.next();
                 setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
-                batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+
+                SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                 total_epoch_loss += batch_loss;
                 batch_loss.backward();
 
@@ -373,7 +380,10 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
                     auto ds = val_loader->next();
                     setup_inputs_and_outputs(ds, sigmoid_scale, start_lambda, end_lambda, epoch, max_epochs, threads);
 
-                    val_batch_loss = loss_fn(nnue.forward(x1_sparse, x2_sparse), target);
+                    SparseInput x1_input{x1_indices_tensor, x1_counts_tensor, feature_size, max_active};
+                    SparseInput x2_input{x2_indices_tensor, x2_counts_tensor, feature_size, max_active};
+
+                    val_batch_loss = loss_fn(nnue.forward(x1_input, x2_input), target);
                     total_val_loss += val_batch_loss.item<float>();
                 }
             }
@@ -386,9 +396,11 @@ void Trainer::train(SeraphinaNNUE& nnue, std::vector<std::string>& train_files, 
             {
                 path << output_dir << "/epoch-" << epoch << ".nnue";
                 nnue.save(path.str());
+                path.str("");
                 path.clear();
                 path << output_dir << "/epoch-" << epoch << ".ckpt";
                 save_torch_weights(nnue, path.str());
+                path.str("");
                 path.clear();
             }
         }
